@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel A23 4G Turbo
 on:
   workflow_dispatch:
     inputs:
@@ -9,99 +9,67 @@ on:
       KSU:
         description: Enable KernelSU support
         type: boolean
-      CLANG_EIGHTEEN:
-        description: Use clang 18 (optional)
-        type: boolean
-        
+        default: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    environment: bot_ci
     steps:
     - uses: actions/checkout@v4
       with:
         repository: rsuntkOrgs/android_kernel_samsung_a23
         ref: android-4.19-stable
         path: android_kernel_samsung_a23
-        show-progress: false
         fetch-depth: 1
         
     - name: Prepare dependencies
       run: |
-        sudo apt update -y && sudo apt upgrade -y
-        sudo apt install bc cpio flex bison aptitude git gcc g++ python-is-python3 tar perl curl libc++-dev lz4 -y
-        sudo aptitude install libssl-dev -y
+        sudo apt update -y
+        sudo apt install bc cpio flex bison git gcc g++ python-is-python3 tar perl curl libc++-dev lz4 libssl-dev -y
         
-    - name: Fetch toolchains
+    - name: Fetch Toolchain (Clang 18)
       run: |
         mkdir toolchains
         cd toolchains
-        if [[ ${{ github.event.inputs.CLANG_EIGHTEEN }} != "true" ]]; then
-          git clone --depth=1 https://gitlab.com/Rissu-Projekt/toolchains/clang-toolchains.git clang-11
-        else
-          mkdir clang-18 && cd clang-18
-          wget -q -O clang18.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
-          tar -xf clang18.tar.gz && rm clang18.tar.gz && cd ..
-        fi
+        mkdir clang-18 && cd clang-18
+        # Clang 18 é essencial para performance no Android 14/16
+        wget -q -O clang18.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
+        tar -xf clang18.tar.gz && rm clang18.tar.gz
+        cd ..
         git clone --depth=1 https://gitlab.com/Rissu-Projekt/toolchains/aarch64-linux-android.git google
       working-directory: android_kernel_samsung_a23
 
-    - name: Prepare timezone fix
-      run: |
-        sudo rm /etc/localtime
-        sudo ln -s /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-      
-    - name: Build kernel
+    - name: Build kernel (Turbo Mode)
       id: buildKernel
       run: |
-        export PATH=$(pwd)/toolchains/clang-11/bin:$PATH
-        export CROSS_COMPILE=$(pwd)/toolchains/google/bin/aarch64-linux-android-
+        # Configurando o PATH corretamente para o Clang 18
+        export PATH=$(pwd)/toolchains/clang-18/bin:$(pwd)/toolchains/google/bin:$PATH
+        export CROSS_COMPILE=aarch64-linux-android-
         export CLANG_TRIPLE=aarch64-linux-gnu-
-        export DEFCONFIG="${{ github.event.inputs.DEFCONFIG }}"
-        export KERNELSU="${{ github.event.inputs.KSU }}"
-
-        export KBUILD_BUILD_USER="rsuntk"
-        export KBUILD_BUILD_HOST="rsuntk_orgs"
-        export DEVICE=A235X
-        export IS_CI=true
-
-        # do some checks
-        echo ""
-        echo ====================================================
-        echo CROSS_COMPILE=$CROSS_COMPILE
-        echo DEFCONFIG="${{ github.event.inputs.DEFCONFIG }}"
-        echo CLANG="clang -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'"
-        echo CLANG_TRIPLE=$CLANG_TRIPLE
-        echo KBUILD_BUILD_USER=$KBUILD_BUILD_USER
-        echo KBUILD_BUILD_HOST=$KBUILD_BUILD_HOST
-        echo CURRENT_DIR=$(pwd)
-        echo DATE=date
-        echo KERNELSU="$KERNELSU"
-        echo ====================================================
-        echo ""
+        export ARCH=arm64
         
-        bash $(pwd)/build_kernel.sh echo $DEFCONFIG echo $KERNELSU $(nproc --all)
+        # --- INJEÇÃO DE PERFORMANCE ---
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
+        # Otimização -O3 e otimização para o processador Cortex-A73/A53 do SD680
+        export KCFLAGS="-O3 -pipe -march=armv8-a+crc+crypto"
+        # ------------------------------
 
-        echo ""
-        echo "===================================================="
-        strings out/arch/arm64/boot/Image | grep "Linux version"
-        echo "===================================================="
-        export gitsha1=$(git rev-parse --short HEAD)
-        echo "sha=$gitsha1" >> $GITHUB_OUTPUT
-        buildDetails="make kernelversion-echo $DEVICE_echo $gitsha1-date +'%Y%m%d%H%M%S'" && echo "buildDetails=$buildDetails" >> $GITHUB_OUTPUT
-        mv out/.config out/build_config.txt
+        # Aplicar KernelSU se solicitado
+        if [[ "${{ github.event.inputs.KSU }}" == "true" ]]; then
+            curl -LSs "https://raw.githubusercontent.com/rifsytn/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+        fi
+
+        # Comando de build corrigido (sem os 'echo' perdidos)
+        bash build_kernel.sh ${{ github.event.inputs.DEFCONFIG }} ${{ github.event.inputs.KSU }} $(nproc --all)
+
+        # Exportar variáveis para o upload
+        echo "buildDetails=A23q-Turbo-$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
       working-directory: android_kernel_samsung_a23
       
-    - name: Upload config
+    - name: Upload Kernel Image
       uses: actions/upload-artifact@v4
       with:
-        name: Config-${{ steps.buildKernel.outputs.buildDetails }}
-        path: android_kernel_samsung_a23/out/build_config.txt
-        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: Build-${{ steps.buildKernel.outputs.buildDetails }}
-        path: |
-          android_kernel_samsung_a23/out/arch/arm64/boot/*.gz
-          android_kernel_samsung_a23/out/arch/arm64/boot/dts/*
+        name: ${{ steps.buildKernel.outputs.buildDetails }}
+        path: android_kernel_samsung_a23/out/arch/arm64/boot/Image
